@@ -1,5 +1,7 @@
 # Reconstruct AI skills
 
+[![Smithery](https://smithery.ai/badge/cryptify/reconstruct)](https://smithery.ai/servers/cryptify/reconstruct)
+
 [Reconstruct](https://reconstruct.dev) captures web interfaces — screenshots, element trees, styles, assets, routes and recorded flows — and serves them to AI coding agents through a hosted MCP server. This repository packages that server together with nine agent skills that guide an agent from inspecting a reference interface to building, verifying and launching a product.
 
 It works as a Claude Code plugin, a Cursor plugin, a Gemini CLI extension and a plain [Agent Skills](https://agentskills.io) collection.
