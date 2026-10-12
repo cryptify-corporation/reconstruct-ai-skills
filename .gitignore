@@ -1,3 +1,9 @@
 .DS_Store
 *.log
 .mcpb-cache/
+__pycache__/
+*.py[cod]
+/public-package/
+/.publish-key/
+/.publish-github/
+/ci-publish-key.pub
