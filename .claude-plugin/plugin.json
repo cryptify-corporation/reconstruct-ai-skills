@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "reconstruct",
   "displayName": "Reconstruct",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Reconstruct MCP server and nine agent skills for inspecting captured web interfaces and turning them into designed, built, verified and launched products.",
   "author": {
     "name": "Cryptify",

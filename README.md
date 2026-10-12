@@ -83,4 +83,4 @@ Reading captures requires a Reconstruct account; the plugin never asks for your 
 
 Reconstruct AI Skills are part of Reconstruct, a product owned by Cryptify. Copyright (c) 2026 Cryptify. All rights reserved.
 
-These skills are provided under a proprietary license for personal or internal business use with Reconstruct. Redistribution, resale, and publication of modified versions require prior written permission from Cryptify. See [LICENSE](LICENSE).
+These skills are provided under a proprietary license for personal or internal business use with Reconstruct. Redistribution, resale, and publication of modified versions require prior written permission from Cryptify. See [LICENSE](LICENSE). Third-party attribution and retained upstream permission notices are in [NOTICE](NOTICE).
