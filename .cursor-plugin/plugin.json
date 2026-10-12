@@ -1,0 +1,15 @@
+{
+  "name": "reconstruct",
+  "displayName": "Reconstruct",
+  "version": "0.1.0",
+  "description": "Reconstruct MCP server and nine agent skills for inspecting captured web interfaces and turning them into designed, built, verified and launched products.",
+  "author": {
+    "name": "Cryptify",
+    "url": "https://reconstruct.dev"
+  },
+  "homepage": "https://reconstruct.dev/docs/connect-ai-agents",
+  "repository": "https://github.com/cryptify-corporation/reconstruct-ai-skills",
+  "license": "SEE LICENSE IN LICENSE",
+  "keywords": ["reconstruct", "mcp", "ui", "design", "frontend", "screenshots", "skills"],
+  "logo": "assets/logo.svg"
+}

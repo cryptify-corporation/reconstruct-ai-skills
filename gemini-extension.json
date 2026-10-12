@@ -1,0 +1,10 @@
+{
+  "name": "reconstruct-ai-skills",
+  "version": "0.1.0",
+  "description": "Reconstruct MCP server and nine agent skills for inspecting captured web interfaces and turning them into designed, built, verified and launched products.",
+  "mcpServers": {
+    "reconstruct": {
+      "httpUrl": "https://reconstruct.dev/mcp"
+    }
+  }
+}

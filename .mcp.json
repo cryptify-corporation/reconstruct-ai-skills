@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "reconstruct": {
+      "type": "http",
+      "url": "https://reconstruct.dev/mcp"
+    }
+  }
+}

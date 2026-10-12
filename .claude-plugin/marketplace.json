@@ -1,0 +1,18 @@
+{
+  "name": "reconstruct",
+  "owner": {
+    "name": "Cryptify"
+  },
+  "metadata": {
+    "description": "Reconstruct plugin for Claude Code: hosted MCP server and agent skills."
+  },
+  "plugins": [
+    {
+      "name": "reconstruct",
+      "source": "./",
+      "description": "Reconstruct MCP server and nine agent skills for inspecting captured web interfaces and turning them into designed, built, verified and launched products.",
+      "category": "development",
+      "homepage": "https://reconstruct.dev"
+    }
+  ]
+}
