@@ -9,7 +9,7 @@ Turn observed UI requirements into an explicitly designed server implementation.
 
 ## Establish contracts
 
-Read the task's scope and available scenario evidence. List observed inputs, outcomes and state transitions; mark inferred validation and persistence rules as design decisions. Inspect the existing backend, authentication, repository boundaries and migration workflow before choosing technology. Preserve the project's conventions; apply Cryptify-specific standards only in Cryptify projects.
+Read the task's scope and available scenario evidence. List observed inputs, outcomes and state transitions; mark inferred validation and persistence rules as design decisions. Form `field` metadata gives input types and client constraints. A scenario step's `network` shows that a request followed the action, with method, id-free path, status and body shape (keys and value types only); treat it as evidence of an outcome, not as an API to copy. Inspect the existing backend, authentication, repository boundaries and migration workflow before choosing technology. Preserve the project's conventions; apply Cryptify-specific standards only in Cryptify projects.
 
 Define typed request/response models, ownership, authorization and errors for the selected flow. Identify its real data invariants: duplicate submissions, conflicting updates, state transitions, time handling and quotas where applicable. Put enforcement at the appropriate server/storage boundary rather than relying on disabled UI controls.
 

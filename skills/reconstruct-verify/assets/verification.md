@@ -7,6 +7,13 @@ Capture coverage limitations:
 | Check | Expected | Actual | Evidence | Result |
 | --- | --- | --- | --- | --- |
 
+## Measured state comparisons
+
+| Profile / frame / state | Source node → rendered element | Expected bounds / typography / paint | Actual | Tolerance | Evidence | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+
+For open surfaces, include the surface, internal controls and layout, clipping and reachable actions. An outer bounds match alone is insufficient.
+
 ## Confirmed bugs
 
 For each: ID, severity, reproduction steps, expected, actual, evidence, fix and regression check.

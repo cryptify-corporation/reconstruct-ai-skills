@@ -19,6 +19,8 @@ Map the selected palette into the existing token roles and verify important text
 
 Define concise voice guidance and rewrite the product's own high-visibility strings when requested. For a new product based on another product's patterns, use its own or licensed logos, assets and content. Inspect titles, favicons, metadata, empty states and emails for unintended borrowed identity.
 
+For a capture, `get_page_summary.evidence.meta` lists description, Open Graph, Twitter, theme colors, icons and the web manifest, and `evidence.logos` ranks logo elements with confidence and matched signals. Use them to find borrowed identity, and treat a low-confidence logo as a candidate to confirm visually.
+
 Search reference names and domains as a diagnostic, then inspect matches. Preserve legitimate attribution, integration identifiers and documented comparisons; substring matches alone do not justify deleting them. A clean text search is not proof that all visual assets are appropriate.
 
 ## Deliver

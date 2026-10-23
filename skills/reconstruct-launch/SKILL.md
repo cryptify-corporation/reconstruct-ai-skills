@@ -13,7 +13,7 @@ Read the implementation and verification results before promising capabilities. 
 
 ## Create requested materials
 
-For a landing page, connect the audience's problem, the demonstrated workflow, relevant features and a clear action. Use screenshots of the actual product. Follow the project's existing frontend and publishing conventions; create a site or page only when requested.
+For a landing page, connect the audience's problem, the demonstrated workflow, relevant features and a clear action. Keep public-facing copy separate from internal evidence, implementation and QA notes. Capture identifiers, viewport pixel counts, grid measurements, infrastructure names and diagnostic placeholders belong in the handoff/checklist, not in marketing copy; describe only what helps the intended reader decide or act. Use screenshots of the actual product. Follow the project's existing frontend and publishing conventions; create a site or page only when requested.
 
 For pricing, read current first-party competitor pricing with dates and URLs. Propose a model using the product's costs, usage units and intended audience. Distinguish a pricing hypothesis from validated willingness to pay. Do not infer sustainable pricing simply by undercutting a competitor or assume three tiers and annual discounts are always appropriate.
 
