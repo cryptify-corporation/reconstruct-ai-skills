@@ -2,18 +2,21 @@
 
 This is a reading guide to the advertised normalized Scene artifact, not a promise that every adapter, export tool or target renderer is implemented. Read actual MCP schemas and artifact issues before choosing a workflow.
 
-When `get_interface_scene` is advertised, its manifest identifies `schema` (the Scene contract) and `artifactSchema` (the export envelope). Read the hashed artifact programmatically: `{schema: "reconstruct.scene-export.v1", scene, assets}`. `assets` maps scene resource IDs to archived `path`, authenticated `uri`, `mimeType`, `sha256` and `sizeBytes`. `schemaPath`/`schemaUri`/`schemaSha256` provide the machine-readable JSON Schema separately. Server paths are local only to that server. The manifest shows at most 30 issues with `issueCount`/`issuesTruncated`; the artifact retains every issue. Exported scene IDs include product, version, environment, page and view; producer-local frame/profile IDs stay scoped to that document.
+When `get_interface_scene` is advertised, its manifest identifies `schema` (the Scene contract) and `artifactSchema` (the export envelope). Read the hashed artifact programmatically: `{schema: "reconstruct.scene-export.v1", scene, assets}`. `assets` maps scene resource IDs to archived `path`, authenticated `uri`, `mimeType`, `sha256` and `sizeBytes`. Over HTTP the manifest also carries `download`: `url`/`schemaUrl` are signed absolute links that need no Authorization header, and any relative `/mcp-transfers/…` or `/mcp-assets/…` URI resolves by appending it to `download.baseUrl`. The links expire at `download.expiresAt`; call the tool again for fresh ones and do not publish them. `schemaPath`/`schemaUri`/`schemaSha256` provide the machine-readable JSON Schema separately. Server paths are local only to that server. The manifest shows at most 30 issues with `issueCount`/`issuesTruncated`; the artifact retains every issue. Exported scene IDs include product, version, environment, page and view; producer-local frame/profile IDs stay scoped to that document.
 
 
 | Scope | Current fields and meaning |
 | --- | --- |
-| Document | `schema`, `id`, `platform`, optional `entryFrameId`, `profiles`, `frames`, `resources`, `transitions`, `correspondences`, `issues` |
+| Document | `schema`, `id`, `platform`, optional `entryFrameId`, `profiles`, `frames`, `resources`, `transitions`, `correspondences`, `issues`, `themes`, `layoutSamples` |
 | Profile | `id`, logical `width`/`height`, optional `pixelDensity`, `fontScale`, `safeInsets`, `locale`, `theme` |
 | Frame | `id`, `profileId`, `stateId`, `coordinateSpace`, optional `extent` and `viewportBounds`, `truncated`, `nodes`, evidence references |
-| Node | Frame-local `id`/`parentId`, `kind`, `semantics`, visibility fact, geometry, layout, paint, text runs, media resource reference, actions, motion and evidence |
+| Node | Frame-local `id`/`parentId`, `kind`, `semantics`, visibility fact, geometry, layout, paint, text runs, media resource reference, actions, motion, evidence and optional `states` |
+| Node state | `state` (`hover`, `focus-visible`, `active`, `disabled`, …), `trigger` action kind, `changes` (adapter properties; Web: computed CSS in camelCase), `kind`, `evidence` (includes the state screenshot), optional `triggerNodeId` when an ancestor's state restyles this node, optional `method` |
+| Theme | `id`, `current`, `colorScheme`, `tokens` (Web: CSS custom properties) and `evidence` screenshots. Only the current theme was rendered into frames; others are token sets |
+| Layout sample | `id`, source `frameId`, window `width`/`height`, optional `contentHeight`, sparse `nodes` (`nodeId`, measured `bounds`, sampled `layout` properties) and `evidence`. Not a frame: appearance and text were not re-measured |
 | Fact | `value`, `kind` (`measured`, `declared`, `inferred`), evidence references and optional confidence |
 | Geometry | Visual bounds; optional layout bounds, transform, stacking context and paint order. Rectangles are measurements, not size policies |
-| Layout | Typed arrangement/placement, axis size constraints, wrap/reverse, padding, gaps, alignment, tracks, clipping and anchors. Use only represented constraints |
+| Layout | Typed arrangement/placement, axis size constraints, wrap/reverse, padding, gaps, alignment, tracks, clipping and anchors. Use only represented constraints; a minimum above the maximum is valid CSS and the minimum wins |
 | Resource | `id`, `kind`, optional URI, MIME type, SHA-256 and byte count. Follow the export's download manifest; an ID alone does not make original bytes available |
 | Transition | Source frame, optional destination frame/node, action, outcome, evidence kind/references and optional motion |
 | Correspondence | Explicit relationship between frame/node pairs with provenance; it is not guaranteed one-to-one identity |
@@ -21,6 +24,8 @@ When `get_interface_scene` is advertised, its manifest identifies `schema` (the 
 An absent fact is unknown. The current evidence-kind enum has no `unknown` member: do not invent one. Some value enums contain `unknown`; use that only where the actual schema permits it. Optional native declarations that cannot be resolved into effective properties remain declarations/issues, not measured values.
 
 `SceneGeometry` bounds use the frame's coordinate plane with logical lengths supplied by the adapter. Native Android raw accessibility bounds are physical screen pixels; density-based conversion must happen explicitly at the adapter boundary. WebView evidence may use a separate viewport plane. Density does not supply an unrecorded font scale, system inset, scroll offset or cross-plane transform.
+
+Node states are measured deltas against the frame's default appearance, not separate frames; an absent state was not measured, not proven unchanged. A theme without `current` was not rendered into any frame, so only its tokens are evidence. Layout samples give breakpoint geometry: nodes missing from a sample were not matched, and a sample does not establish the CSS rule that produced it.
 
 Actions express supported or proposed operations. A transition outcome of `changed` or `unchanged` is different from `failed`, `unknown` and `performedUnverified`. Check the associated frame and evidence before claiming success, and test the rebuilt application separately.
 

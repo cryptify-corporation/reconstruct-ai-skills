@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, offline queries over an MCP Scene export. Never executes capture data."""
+"""Bounded queries over an MCP Scene export. Offline unless --base-url is given for signed asset downloads. Never executes capture data."""
 import argparse
 import hashlib
 import html
@@ -9,7 +9,8 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
+import urllib.request
 
 
 def fact(value):
@@ -54,7 +55,6 @@ def visibility(node, nodes):
 
 def row(node, nodes):
     semantics = node.get('semantics') or {}
-    # An additional guard for consumer input; a redacted node must never regain text.
     sensitive = semantics.get('sensitive', False)
     text = '' if sensitive else ''.join(run.get('text', '') for run in node.get('text', []))
     return {k: v for k, v in {
@@ -219,6 +219,8 @@ def coverage(document):
             'nodesWithExplicitVisibility': sum(fact(node.get('visible')) is not None for node in nodes),
             'declaredActions': len(actions), 'actionsWithObservedOutcome': sum(action in observed for action in actions),
             'actionsWithoutObservedOutcome': [{'nodeId': node, 'action': action} for node, action in actions if (node, action) not in observed],
+            'nodesWithStates': sum(bool(node.get('states')) for node in nodes),
+            'measuredStates': sum(len(node.get('states') or []) for node in nodes),
             'mediaReferences': len(media),
             'unavailableMediaReferences': [{'nodeId': node['id'], 'resourceId': node['mediaResourceId']} for node in media if node['mediaResourceId'] not in assets],
         })
@@ -226,11 +228,32 @@ def coverage(document):
             'note': 'Evidence inventory, not a fidelity score or proof of working implementation. A hover transition does not verify click; declared/failed/unverified actions are not observed successful outcomes. Missing data needs capture/adapter/format work, never application source recovery.',
             'frames': result, 'archivedResources': len(assets), 'declaredResources': len(scene.get('resources', [])),
             'fontResources': sum(resource.get('kind') == 'font' and resource['id'] in assets for resource in scene.get('resources', [])),
+            'themes': [{'id': theme['id'], 'current': theme.get('current', False), 'tokens': len(theme.get('tokens') or {})}
+                       for theme in scene.get('themes') or []],
+            'layoutSamples': [{'id': sample['id'], 'width': sample['width'], 'frameId': sample['frameId'],
+                               'nodes': len(sample.get('nodes') or [])} for sample in scene.get('layoutSamples') or []],
             'issues': scene.get('issues', [])}
 
 
-def copy_assets(document, output):
-    """Only explicit MCP server-local files, with mandatory digest verification; no network."""
+def _download(base_url, uri, limit=64 * 1024 * 1024):
+    """GET base_url + uri for a relative /mcp-transfers/ or /mcp-assets/ artifact URI; no credentials are sent."""
+    if not isinstance(uri, str) or not re.match(r'^/mcp-(transfers|assets)/[A-Za-z0-9._-]+$', uri):
+        raise ValueError('Not a relative MCP artifact URI: ' + str(uri))
+    request = urllib.request.Request(base_url.rstrip('/') + uri, headers={'User-Agent': 'reconstruct-scene-reader/1.0'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('Artifact exceeds the download limit: ' + uri)
+    return data
+
+
+def copy_assets(document, output, base_url=None):
+    """Server-local files, or with base_url (download.baseUrl from the MCP tool result) signed HTTPS downloads.
+    Every byte is checked against the export's SHA256."""
+    if base_url is not None:
+        parts = urlsplit(base_url)
+        if parts.scheme != 'https' and parts.hostname not in ('localhost', '127.0.0.1'):
+            raise ValueError('--base-url must be the https download.baseUrl returned by the MCP tool.')
     output.mkdir(parents=True, exist_ok=True)
     result = {}
     suffixes = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp',
@@ -239,23 +262,56 @@ def copy_assets(document, output):
                 'video/mp4': '.mp4', 'video/webm': '.webm', 'audio/mpeg': '.mp3', 'audio/ogg': '.ogg'}
     for identifier, asset in document.get('assets', {}).items():
         source = Path(asset['path']) if asset.get('path') else None
+        data = None
         if source is None or not source.is_file():
-            result[identifier] = {'available': False, 'reason': 'Server path unavailable locally; download its authenticated MCP URI separately.'}
-            continue
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            if base_url is None or not asset.get('uri'):
+                result[identifier] = {'available': False, 'reason': 'Server path unavailable locally; rerun assets/scaffold with '
+                                      '--base-url set to download.baseUrl from the MCP tool result.'}
+                continue
+            try:
+                data = _download(base_url, asset['uri'])
+            except (OSError, ValueError) as error:
+                result[identifier] = {'available': False, 'reason': 'Download failed: ' + str(error)[:200]}
+                continue
+        digest = hashlib.sha256(data if data is not None else source.read_bytes()).hexdigest()
         if digest != asset.get('sha256'):
             raise ValueError('Asset SHA256 mismatch: ' + identifier)
         suffix = suffixes.get((asset.get('mimeType') or '').split(';')[0], '.bin')
         destination = output / (digest + suffix)
         if destination.is_symlink():
             raise ValueError('Refusing a symlink output.')
-        if source.resolve() != destination.resolve():
+        if data is not None:
+            destination.write_bytes(data)
+        elif source.resolve() != destination.resolve():
             shutil.copyfile(source, destination)
         result[identifier] = {'available': True, 'file': str(destination), 'sha256': digest}
+        rendered = symbol_render_copy(destination) if suffix == '.svg' else None
+        if rendered:
+            result[identifier].update({'file': str(rendered), 'renderedFrom': str(destination)})
     return result
 
 
-# --- Deterministic scene -> HTML scaffold and compact verifier -------------------------------
+def symbol_render_copy(path):
+    """Older captures stored sprite icons as <svg><symbol>…</symbol></svg> without <use>, which renders blank.
+    Writes a derived <sha>.render.svg (symbol -> g, viewBox on the root); the original verified file is kept."""
+    text = path.read_text(encoding='utf-8', errors='strict')
+    if '<symbol' not in text or re.search(r'<use\b', text):
+        return None
+    root = re.match(r'\s*<svg\b[^>]*>', text)
+    symbol = re.search(r'<symbol\b([^>]*)>', text)
+    if not root or not symbol:
+        return None
+    head = root.group(0)
+    view_box = re.search(r'viewBox="([^"]+)"', symbol.group(1))
+    if view_box and 'viewBox=' not in head:
+        head = head[:-1] + ' viewBox="' + view_box.group(1) + '">'
+    body = re.sub(r'<symbol\b([^>]*)>', lambda match: '<g' + re.sub(r'\s(?:viewBox|id)="[^"]*"', '', match.group(1)) + '>',
+                  text[root.end():]).replace('</symbol>', '</g>')
+    rendered = path.with_name(path.stem + '.render.svg')
+    rendered.write_text(head + body, encoding='utf-8', newline='\n')
+    return rendered
+
+
 
 ARIA_ROLES = {'alert', 'button', 'checkbox', 'dialog', 'grid', 'heading', 'img', 'link', 'list', 'listbox', 'listitem',
               'menu', 'menubar', 'menuitem', 'navigation', 'banner', 'contentinfo', 'main', 'option', 'progressbar',
@@ -306,6 +362,106 @@ def _css_string(value):
     return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ') + '"'
 
 
+STATE_SELECTORS = {'hover': ':hover', 'focus': ':focus', 'focus-visible': ':focus-visible', 'focus-within': ':focus-within',
+                   'active': ':active', 'disabled': ':is(:disabled,[aria-disabled="true"])', 'checked': ':checked'}
+_CSS_PROPERTY = re.compile(r'^-?[a-z][a-z0-9-]*$')
+_CSS_TOKEN = re.compile(r'^--[A-Za-z0-9_-]{1,120}$')
+
+
+def _kebab(name):
+    return re.sub(r'([A-Z])', lambda match: '-' + match.group(1).lower(), name)
+
+
+def _safe_css_value(value):
+    """Captured values are untrusted: keep plain values only, never anything that can close a rule or fetch."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 400:
+        return None
+    lowered = value.lower()
+    if any(char in value for char in '{};<>\\\n\r') or 'url(' in lowered or 'expression(' in lowered or '@import' in lowered:
+        return None
+    return value.strip()
+
+
+def state_rules(raw_nodes, emitted):
+    """CSS for measured interaction states (nodes[].states); unknown states and unsafe values are reported, not guessed."""
+    rules, skipped = [], []
+    for node_id in sorted(emitted):
+        for state in (raw_nodes.get(node_id) or {}).get('states') or []:
+            pseudo = STATE_SELECTORS.get(state.get('state'))
+            declarations = []
+            for name, value in sorted((state.get('changes') or {}).items()):
+                prop, safe = _kebab(name), _safe_css_value(value)
+                if safe is not None and _CSS_PROPERTY.match(prop):
+                    declarations.append(prop + ':' + safe)
+            trigger = state.get('triggerNodeId')
+            if pseudo is None or not declarations or (trigger and trigger not in emitted):
+                skipped.append({'nodeId': node_id, 'state': state.get('state'),
+                                'reason': 'no CSS selector for this state' if pseudo is None else
+                                'trigger node not emitted' if declarations else 'no safe declarations'})
+                continue
+            target = '[data-node-id=' + _css_string(node_id) + ']'
+            selector = ('[data-node-id=' + _css_string(trigger) + ']' + pseudo + ' ' + target) if trigger else target + pseudo
+            rules.append(_rule(selector, declarations))
+    return rules, skipped
+
+
+def theme_rules(scene):
+    """Current theme tokens on :root, other captured themes under [data-theme=ID] (no OS switching was measured)."""
+    themes = scene.get('themes') or []
+    current = next((theme for theme in themes if theme.get('current')), None)
+    base = (current or {}).get('tokens') or {}
+    rules, summary = [], []
+    for theme in themes:
+        tokens = theme.get('tokens') or {}
+        changed = tokens if theme is current else {key: value for key, value in tokens.items() if base.get(key) != value}
+        declarations = [key + ':' + safe for key, value in sorted(changed.items())
+                        if _CSS_TOKEN.match(key) and (safe := _safe_css_value(value)) is not None]
+        selector = ':root' if theme is current else ':root[data-theme=' + _css_string(theme['id']) + ']'
+        if declarations:
+            rules.append(_rule(selector, declarations))
+        summary.append({'id': theme['id'], 'current': bool(theme.get('current')), 'selector': selector,
+                        'tokens': len(declarations), 'evidence': theme.get('evidence') or []})
+    return rules, summary
+
+
+def layout_sample_table(scene, frame_id, emitted):
+    """Per-node geometry at each sampled width, for writing media queries by hand. Sparse: only sampled nodes."""
+    frames = {frame['id']: frame for frame in scene.get('frames') or []}
+
+    def evidence_key(node):
+        return next((item for item in node.get('evidence') or [] if re.match(r'^web:elements?[/:]\d+$', item)), None)
+
+    target = {key: node['id'] for node in (frames.get(frame_id) or {}).get('nodes') or [] if (key := evidence_key(node))}
+    translations = {}
+
+    def translate(source_frame, node_id):
+        # Samples are measured once against one frame; other frames of the same page share element evidence.
+        if source_frame == frame_id:
+            return node_id
+        if source_frame not in translations:
+            translations[source_frame] = {node['id']: target.get(evidence_key(node))
+                                          for node in (frames.get(source_frame) or {}).get('nodes') or []}
+        return translations[source_frame].get(node_id)
+
+    samples = [sample for sample in scene.get('layoutSamples') or [] if sample.get('frameId') in frames]
+    table = {}
+    for sample in samples:
+        key = _n(sample['width'])
+        for item in sample.get('nodes') or []:
+            node_id = translate(sample['frameId'], item['nodeId'])
+            if node_id in emitted:
+                bounds = item['bounds']
+                table.setdefault(node_id, {})[key] = {'x': bounds['x'], 'y': bounds['y'], 'width': bounds['width'],
+                                                      'height': bounds['height'], **(item.get('layout') or {})}
+    summary = [{'id': sample['id'], 'width': sample['width'], 'height': sample['height'],
+                'nodes': sum(translate(sample['frameId'], item['nodeId']) in emitted for item in sample.get('nodes') or []),
+                'evidence': sample.get('evidence') or []} for sample in sorted(samples, key=lambda item: item['width'])]
+    return {'schema': 'reconstruct.layout-samples.v1', 'frameId': frame_id,
+            'note': 'Measured geometry at other window widths keyed by node ID then width. Use it to write breakpoints; '
+                    'nodes absent here were not sampled. Appearance and text were not re-measured.',
+            'widths': summary, 'nodes': table}, summary
+
+
 def _rule(selector, declarations):
     return selector + '{' + ';'.join(declarations) + '}\n' if declarations else ''
 
@@ -349,11 +505,10 @@ def style_css(style):
     placement = style.get('placement')
     if placement in ('overlay', 'anchored'): out.append('position:absolute')
     elif placement == 'sticky': out.append('position:sticky')
-    # Paint.
     if style.get('fill'): out.append('background-color:' + _rgba(style['fill']))
     if style.get('opacity') is not None: out.append('opacity:' + _n(style['opacity']))
     if style.get('cornerRadii'):
-        radii = style['cornerRadii']  # top/right/bottom/left = top-left/top-right/bottom-right/bottom-left
+        radii = style['cornerRadii']
         out.append('border-radius:' + ' '.join(_px(radii[side]) for side in ('top', 'right', 'bottom', 'left')))
     for stroke in style.get('strokes') or []:
         border = _px(stroke['width']) + ' solid ' + _rgba(stroke['color'])
@@ -374,7 +529,6 @@ def style_css(style):
         if fit in ('contain', 'cover', 'stretch', 'original'):
             out.append('background-size:' + {'stretch': '100% 100%', 'original': 'auto'}.get(fit, fit))
         if position: out.append('background-position:%s%% %s%%' % (_n(position['x'] * 100), _n(position['y'] * 100)))
-    # Typography.
     if style.get('family'):
         family = style['family']
         out.append('font-family:' + (family if family.lower() in GENERIC_FONTS else _css_string(family) + ',sans-serif'))
@@ -431,7 +585,6 @@ def _frame_keys(frame):
     strong, weak = {}, {}
     for node_id in nodes:
         own_label, context, text = label(node_id), anchor(node_id), text_of(node_id)
-        # Anonymous nodes (no label, text or labeled ancestor) are never matched: ordinal alone is a guess.
         if any(own_label[1:]) or text or context:
             strong[node_id] = json.dumps([own_label, text, context])
         if any(own_label[1:]):
@@ -459,14 +612,13 @@ def match_frames(source, target):
         return fact((node.get('geometry') or {}).get('visualBounds'))
 
     def same_box(left, right):
-        # Height is free: containers grow or shrink with revealed content between observations.
         return left == right or (left and right and all(abs(left[key] - right[key]) <= 2 for key in ('x', 'y', 'width')))
 
     b_children = {}
     for node_id, node in b_nodes.items():
         b_children.setdefault(node.get('parentId'), []).append(node_id)
-    for node_id, node in a_nodes.items():  # parents precede children in export order
-        if node_id in pairs or node_id in a_weak: continue  # labeled nodes match by content only
+    for node_id, node in a_nodes.items():
+        if node_id in pairs or node_id in a_weak: continue
         parent = node.get('parentId')
         if parent is not None and parent not in pairs: continue
         used = set(pairs.values())
@@ -535,7 +687,6 @@ def plan_wiring(scene, frame):
         a_vis = {key: visibility(node, a_nodes) for key, node in a_nodes.items()}
         shown = [key for key in a_nodes if a_vis[key] is not False and (key not in from_after or b_vis[from_after[key]] is False)]
         hidden = [key for key in b_nodes if b_vis[key] is not False and (key not in to_after or a_vis[to_after[key]] is False)]
-        # An unmatched node whose subtree is mostly matched content was re-wrapped, not added or removed.
         shown = [key for key in shown if key in after_entry or not _mostly_matched(a_nodes, after_entry, key)]
         hidden = [key for key in hidden if key in to_after or not _mostly_matched(b_nodes, to_after, key)]
         show, missing = [], 0
@@ -546,7 +697,6 @@ def plan_wiring(scene, frame):
             while parent and parent not in after_entry: parent = a_nodes[parent].get('parentId')
             if parent is None:
                 missing += 1; continue
-            # Keep the destination frame's sibling order: insert before the next sibling present in the scaffold.
             siblings = [item for item in a_nodes if a_nodes[item].get('parentId') == a_nodes[key].get('parentId')]
             following = next((after_entry[item] for item in siblings[siblings.index(key) + 1:] if item in after_entry), None)
             injections.setdefault((after['id'], key), (after_entry[parent], following))
@@ -566,7 +716,7 @@ def plan_wiring(scene, frame):
         for key in hidden:
             if key in to_entry:
                 hide.append(to_entry[key]); continue
-            for other_id, ids in injected_ids.items():  # content another transition injected
+            for other_id, ids in injected_ids.items():
                 target = matched(before, frames[other_id]).get(key)
                 if target in ids:
                     hide.append(other_id + ':' + target); break
@@ -662,7 +812,7 @@ def choose_frame(document, frame_id=None):
     return entry['id'], {'selected': entry['id'], 'entry': entry['id'], 'reason': 'entry frame'}
 
 
-def scaffold(document, output, frame_id=None):
+def scaffold(document, output, frame_id=None, base_url=None):
     frame_id, frame_choice = choose_frame(document, frame_id)
     scene, frame, raw = select(document, frame_id)
     raw = dict(raw)
@@ -675,7 +825,6 @@ def scaffold(document, output, frame_id=None):
     roots = []
     for node in spec['nodes']:
         (children[node['parentId']] if node.get('parentId') else roots).append(node['id'])
-    # Observed transitions become show/hide effects; revealed content absent from this frame is injected hidden.
     wired, unwired, injections = plan_wiring(scene, frame)
     injected_roots, other_specs = set(), {}
     for (other_id, root_id), (parent, following) in injections.items():
@@ -691,7 +840,7 @@ def scaffold(document, output, frame_id=None):
         while pending:
             node_id, parent_id = pending.pop(0)
             prefixed = other_id + ':' + node_id
-            if prefixed in nodes: continue  # already injected by an overlapping transition
+            if prefixed in nodes: continue
             nodes[prefixed] = {**other_nodes[node_id], 'id': prefixed, 'parentId': parent_id}
             raw[prefixed] = other_raw[node_id]
             children[prefixed] = []
@@ -708,7 +857,7 @@ def scaffold(document, output, frame_id=None):
     for item in wired:
         wired_actions.setdefault(item['trigger'], {}).setdefault(transition_actions[item['transition']], []).append(item['transition'])
     output.mkdir(parents=True, exist_ok=True)
-    copied = copy_assets(document, output / 'assets')
+    copied = copy_assets(document, output / 'assets', base_url)
     asset_url = {key: 'assets/' + Path(value['file']).name for key, value in copied.items() if value.get('available')}
     resources = {resource['id']: resource for resource in scene.get('resources', [])}
     profile = next((item for item in scene['profiles'] if item.get('id') == frame.get('profileId')), {})
@@ -727,7 +876,6 @@ def scaffold(document, output, frame_id=None):
             return 'single' if len(roots) == 1 else None
         return layout(node_id).get('arrangement')
 
-    # Repeated sibling structures: same kind/role/styles recursively, ignoring text content.
     signatures = {}
 
     def signature(node_id):
@@ -759,7 +907,8 @@ def scaffold(document, output, frame_id=None):
               'widthFilledFromBounds': [], 'textWidthFromBounds': [], 'minHeightFromBounds': [], 'spacingFromBounds': [], 'backgroundLayersInferred': [],
               'stickyWithoutAnchors': [], 'paintOrderUnknownOverlaps': [],
               'paintOrderUnknownOverlapCount': 0,
-              'missingMedia': [], 'missingFonts': [], 'unresolvedMasks': [], 'actionsWithoutObservedOutcome': []}
+              'missingMedia': [], 'missingFonts': [], 'unresolvedMasks': [], 'actionsWithoutObservedOutcome': [],
+              'inlineRunsOrderInferred': [], 'statesSkipped': []}
     node_rules, html_lines = [], []
     used_styles = set()
 
@@ -833,7 +982,30 @@ def scaffold(document, output, frame_id=None):
             background_cache[node_id] = result
         return background_cache[node_id]
 
+    inline_cache = {}
+
+    def inline_child(node_id):
+        """Text or link nested in a node that has its own text: an inline run of that paragraph, not a positioned block."""
+        if node_id not in inline_cache:
+            node, parent = nodes[node_id], nodes[node_id].get('parentId')
+            result = bool(parent) and bool(nodes[parent]['text']) and not node.get('mediaResourceId')
+            pending, text = [node_id], False
+            while pending and result:
+                current = nodes[pending.pop()]
+                result = current['kind'] in ('text', 'container', 'control') and not current.get('mediaResourceId') and                     normalized_role(current.get('semantics') or {}) in (None, 'link', 'text', 'generic', 'emphasis', 'strong')
+                text |= bool(current['text'])
+                pending += children[current['id']]
+            inline_cache[node_id] = result and text
+        return inline_cache[node_id]
+
+    def leads_runs(node_id):
+        """Inline child measured on its parent's first line goes before the parent's own text; others follow it."""
+        own, outer = bounds(node_id), bounds(nodes[node_id]['parentId'])
+        return bool(own and outer) and own['y'] - outer['y'] < max(own['height'] / 2, 1)
+
     def node_css(node_id):
+        if inline_child(node_id):
+            return ['display:inline']
         node, style, parent = nodes[node_id], layout(node_id), nodes[node_id].get('parentId')
         out, box, origin = [], bounds(node_id), bounds(parent)
         parent_mode = arrangement(parent)
@@ -853,16 +1025,13 @@ def scaffold(document, output, frame_id=None):
         if paint_order is not None and (absolute or parent_mode in ('row', 'column', 'grid', 'stack')):
             out.append('z-index:' + str(int(paint_order)))
         elif background_layer(node_id):
-            # No paint-order fact: a full-bleed media-only overlay is a backdrop, so text and controls stay readable.
             out.append('z-index:-1')
             report['backgroundLayersInferred'].append(node_id)
         elif absolute and parent_mode in (None, 'unknown'):
-            # No paint-order fact: keep the CSS rule lost by flattening flow into absolute boxes:
-            # declared positioned placements paint above their flow siblings.
             if placement in ('overlay', 'anchored', 'sticky'): out.append('z-index:1')
         if children[node_id] and (arrangement(node_id) in (None, 'unknown', 'free') or any(
                 background_layer(child) for child in children[node_id])):
-            out.append('isolation:isolate')  # keep sibling z-order (and backdrops) inside this box
+            out.append('isolation:isolate')
         if placement == 'sticky':
             if anchors.get('top') is not None: out.append('top:' + _px(anchors['top']))
             elif anchors.get('bottom') is not None: out.append('bottom:' + _px(anchors['bottom']))
@@ -873,7 +1042,6 @@ def scaffold(document, output, frame_id=None):
             layout(child).get('placement') in ('overlay', 'anchored') for child in children[node_id])
         if child_absolute and not absolute and placement != 'sticky': out.append('position:relative')
         if box and (absolute or (child_absolute and arrangement(node_id) in (None, 'unknown', 'free'))):
-            # Documented fallback: without an arrangement fact, keep the measured box.
             if not sized['horizontal']: out.append('width:' + _px(box['width']))
             if not sized['vertical']: out.append('height:' + _px(box['height']))
             sized = {'horizontal': True, 'vertical': True}
@@ -894,20 +1062,16 @@ def scaffold(document, output, frame_id=None):
                                 layout(child).get('placement') not in ('overlay', 'anchored')]
             if abs(box['width'] - content) <= 1 and (parent_mode in ('column', 'grid', 'stack', 'single') or
                                                      (parent_mode == 'row' and len(visible_siblings) == 1)):
-                # Fallback: the measured box fills the parent's content width at the captured viewport.
                 out.append('width:100%')
                 report['widthFilledFromBounds'].append(node_id)
             elif node['text'] and not children[node_id] and box['width'] < content - 1 and \
                     parent_mode in ('column', 'grid', 'stack', 'single'):
-                # Fallback: a text block narrower than its stretching parent keeps its measured line length,
-                # so wrapping matches the capture (a declared max-width or start alignment the Scene lacks).
                 out.append('max-width:' + _px(round(box['width'] + 1, 2)))
                 report['textWidthFromBounds'].append(node_id)
         if flow and children[node_id] and not sized['vertical'] and style.get('clip') != 'scroll' and node_id in frame_node_ids:
             vertical = style.get('vertical') or {}
             height = min(box['height'], vertical['maximum']) if vertical.get('maximum') is not None else box['height']
             if height > (vertical.get('minimum') or 0) + 0.5:
-                # Fallback: keep the measured height as a floor; content can still grow it.
                 out.append('min-height:' + _px(height))
                 report['minHeightFromBounds'].append(node_id)
         gap, margins = spacing(node_id), spacing(parent).get('margins', {}) if parent else {}
@@ -918,7 +1082,6 @@ def scaffold(document, output, frame_id=None):
         media = node.get('mediaResourceId')
         constrained = any(sized[axis] or (style.get(axis) or {}).get('policy') == 'fill' for axis in sized)
         if media and not children[node_id] and box and not constrained:
-            # Fallback: an unconstrained replaced element would render at its natural pixel size.
             out += ['width:' + _px(box['width']), 'height:' + _px(box['height'])]
             report['mediaSizedFromBounds'].append(node_id)
         if style.get('clip') == 'scroll':
@@ -945,6 +1108,7 @@ def scaffold(document, output, frame_id=None):
         if content_media and role in (None, 'img', 'image'):
             tag = 'video' if media_kind == 'video' else 'img'
         if tag == 'li' and normalized_role((nodes.get(node.get('parentId')) or {}).get('semantics')) != 'list': tag = 'div'
+        if inline_child(node_id) and tag not in ('a', 'button'): tag = 'span'
         if tag in VOID_TAGS and kids: tag = 'div'
         if tag == 'input' and role == 'textbox' and node['text'] and semantics.get('editable') is False: tag = 'div'
         classes = [node[key] for key in ('layoutStyle', 'paintStyle') if node.get(key) and style_css(styles[node[key]])]
@@ -1021,6 +1185,13 @@ def scaffold(document, output, frame_id=None):
             media_class = node.get('paintStyle') or ''
             html_lines.append(pad + '  <img data-media-of="%s" src="%s" alt=""%s>' % (
                 html.escape(node_id), asset_url[media], ' class="' + media_class + '"' if media_class in used_styles else ''))
+        inline = [child for child in kids if inline_child(child)]
+        leading = [child for child in inline if leads_runs(child)]
+        if inline and node['text']:
+            report['inlineRunsOrderInferred'].append({'nodeId': node_id, 'before': leading,
+                                                      'after': [child for child in inline if child not in leading]})
+        for child in leading:
+            emit(child, depth + 1)
         if tag != 'input':
             for index, run in enumerate(node['text']):
                 run_class = run.get('typographyStyle')
@@ -1029,7 +1200,8 @@ def scaffold(document, output, frame_id=None):
                 html_lines.append(pad + '  <span data-run="%d"%s>%s</span>' % (
                     index, ' class="' + run_class + '"' if run_class else '', html.escape(run['text'])))
         for child in kids:
-            emit(child, depth + 1)
+            if child not in leading:
+                emit(child, depth + 1)
         html_lines.append(pad + '</' + tag + '>')
 
     emitted = set()
@@ -1038,7 +1210,6 @@ def scaffold(document, output, frame_id=None):
     report['nodesEmitted'] = len(emitted)
     report['nodesSkipped'] = [node_id for node_id in nodes if node_id not in emitted]
 
-    # Fonts: @font-face only for archived bytes.
     font_css, provided = [], set()
     for resource in scene.get('resources', []):
         if resource.get('kind') != 'font' or resource['id'] not in asset_url:
@@ -1061,11 +1232,19 @@ def scaffold(document, output, frame_id=None):
     report['unresolvedMasks'] = [{'nodeId': issue.get('nodeId'), 'code': issue['code']} for issue in scene.get('issues', [])
                                  if 'mask' in issue.get('code', '').lower() and issue.get('frameId') in (None, frame['id'])]
 
+    interaction_css, report['statesSkipped'] = state_rules(raw, emitted)
+    report['statesEmitted'] = len(interaction_css)
+    theme_css, report['themes'] = theme_rules(scene)
+    samples_table, report['layoutSamples'] = layout_sample_table(scene, frame['id'], emitted)
+    if report['layoutSamples']:
+        (output / 'layout-samples.json').write_text(json.dumps(samples_table, ensure_ascii=False, separators=(',', ':')),
+                                                    encoding='utf-8', newline='\n')
     root_css = ['position:relative', 'margin:0 auto']
     if profile.get('width'): root_css.append('width:' + _px(profile['width']))
     if len(roots) != 1 and extent.get('height'): root_css.append('height:' + _px(extent['height']))
-    css = (BASE_CSS + ''.join(font_css) + _rule('#scene-root', root_css) +
-           ''.join(_rule('.' + key, style_css(styles[key])) for key in styles if key in used_styles) + ''.join(node_rules))
+    css = (BASE_CSS + ''.join(font_css) + ''.join(theme_css) + _rule('#scene-root', root_css) +
+           ''.join(_rule('.' + key, style_css(styles[key])) for key in styles if key in used_styles) + ''.join(node_rules) +
+           ('/* Measured interaction states (scene nodes[].states). */\n' + ''.join(interaction_css) if interaction_css else ''))
     title = html.escape(str(scene['id']))
     page_html = '\n'.join(['<!doctype html>', '<html lang="%s">' % html.escape(profile.get('locale') or 'en'), '<head>',
                            '<meta charset="utf-8">',
@@ -1124,6 +1303,9 @@ def scaffold(document, output, frame_id=None):
                'nodes': len(frame_node_ids), 'injectedNodes': details['injectedNodes'], 'wired': len(wired),
                'unwired': len(unwired), 'inertActions': counts['actionsWithoutObservedOutcome'],
                'componentCandidates': len(components), 'absoluteFallbackParents': counts['absoluteFallbackParents'],
+               'statesEmitted': report['statesEmitted'], 'statesSkipped': counts['statesSkipped'],
+               'themes': [theme['id'] + (' (current)' if theme['current'] else '') for theme in report['themes']],
+               'layoutSampleWidths': [sample['width'] for sample in report['layoutSamples']],
                'gaps': {key: counts[key] for key in ('missingFonts', 'missingMedia', 'unresolvedMasks',
                                                      'paintOrderUnknownOverlapCount', 'stickyWithoutAnchors', 'unknownVisibility')}
                | {'visibleDialogs': len(dialogs), 'truncatedFrame': frame.get('truncated', False)}}
@@ -1204,7 +1386,7 @@ def todo_items(directory, document=None, frame_id=None):
         """Re-insert the scaffold's subtree for node_id after its nearest present previous sibling."""
         if pristine is None or node_id not in pristine.nodes: return False
         if any(candidate['target'] == '[data-node-id="%s"]' % node_id and candidate['start'] == candidate['end'] for candidate in items):
-            return True  # already queued by another check
+            return True
         source = pristine.nodes[node_id]
         parent = source['parent']
         if parent is not None and parent not in page.nodes: return False
@@ -1257,7 +1439,7 @@ def todo_items(directory, document=None, frame_id=None):
         for node_id in checks['sceneHiddenRespected'].get('renderedVisible', []):
             entry, parent = page.nodes.get(node_id), page.nodes.get(node_id, {}).get('parent')
             while parent and parent not in shown: parent = page.nodes.get(parent, {}).get('parent')
-            if entry is None or parent: continue  # hiding the topmost listed ancestor covers it
+            if entry is None or parent: continue
             opening = page.opening(entry)
             replacement = re.sub(r'\s*(/?)>$', r' hidden\1>', opening, count=1)
             item('sceneHiddenRespected', 'index.html', '[data-node-id="%s"]' % node_id, entry['start'], entry['open_end'],
@@ -1600,7 +1782,7 @@ def verify(directory, document=None, frame_id=None, min_coverage=0.9):
         saved = json.loads((directory / 'scaffold-report.json').read_text(encoding='utf-8'))
         saved = saved if 'expected' in saved else None
     if document is not None and frame_id is None and saved is not None:
-        frame_id = saved.get('frameId')  # check the frame the scaffold was built from
+        frame_id = saved.get('frameId')
     if document is not None:
         scene, frame, raw = select(document, frame_id)
         visible = {node_id for node_id, item in raw.items() if visibility(item, raw) is not False}
@@ -1629,7 +1811,6 @@ def verify(directory, document=None, frame_id=None, min_coverage=0.9):
               notScrollable=clipped[:8])
         covered = expected['visible'] & set(by_node)
         ratio = round(len(covered) / len(expected['visible']), 4) if expected['visible'] else 1.0
-        # Scene-hidden nodes (own or inherited visible=false) must not render without a hidden ancestor.
         shown = sorted(node_id for node_id in expected['hidden'] if page.hidden_by_node.get(node_id) is False)
         check('sceneHiddenRespected', not shown, sceneHidden=len(expected['hidden']), renderedVisible=shown[:8])
         check('coverage', ratio >= min_coverage, frameId=expected['frameId'], visibleNodes=len(expected['visible']),
@@ -1647,6 +1828,9 @@ HELP = """Workflow (one call per step; never read this script's source or the ge
 Evidence gaps (missing fonts/media, unknown paint order, unobserved destinations) are reported, never todo items.
 Optional: verify --dir site (compact JSON, exit 1 on failure); tree --scene SCENE --id NODE --depth 2 (one subtree).
 Queries: overview, brief, coverage, nodes --ids (exact facts, max 12), spec --output, assets --output.
+Remote MCP: add --base-url DOWNLOAD_BASE_URL to scaffold/assets so assets download without credentials (SHA256-checked).
+Scaffold also writes measured states as :hover/:focus-visible/:active/:disabled rules, captured themes as :root and
+:root[data-theme=ID] tokens, and layout-samples.json (geometry at other widths) for writing breakpoints.
 scaffold-report.json is a short summary; scaffold-details.json and site/.scaffold/ are machine input, not for reading."""
 
 
@@ -1658,6 +1842,8 @@ def main():
     parser.add_argument('--dir', type=Path, help='todo/apply/report/verify: scaffold output directory')
     parser.add_argument('--output', type=Path, help='scaffold/assets: directory; spec: file')
     parser.add_argument('--frame', help='exact frame ID (scaffold default: entryFrameId; later commands: the scaffold frame)')
+    parser.add_argument('--base-url', help='scaffold/assets: download.baseUrl from the MCP tool result; fetches assets that are '
+                                           'not on this machine (signed, no credentials) and verifies SHA256')
     parser.add_argument('--item', type=int, help='apply: todo item number')
     parser.add_argument('--id', help='tree: root node ID')
     parser.add_argument('--depth', type=int, default=2, help='tree: levels below --id (default 2)')
@@ -1709,7 +1895,7 @@ def main():
     elif args.command == 'scaffold':
         if args.output is None:
             parser.error('scaffold requires --output DIRECTORY')
-        result = scaffold(document, args.output, args.frame)
+        result = scaffold(document, args.output, args.frame, args.base_url)
     elif args.command == 'spec':
         if args.output is None:
             parser.error('spec requires --output FILE so a dense frame is not dumped into context.')
@@ -1724,7 +1910,7 @@ def main():
     else:
         if args.output is None:
             parser.error('assets requires --output DIRECTORY')
-        result = copy_assets(document, args.output)
+        result = copy_assets(document, args.output, args.base_url)
     print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
 
 
