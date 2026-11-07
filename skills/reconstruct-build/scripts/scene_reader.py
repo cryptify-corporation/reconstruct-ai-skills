@@ -382,16 +382,103 @@ def _safe_css_value(value):
     return value.strip()
 
 
+STROKE_STYLES = {'solid', 'dashed', 'dotted', 'double'}
+_TOKEN_NAME = re.compile(r'^[A-Za-z0-9_-]{1,120}$')
+_AREA_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_-]{0,120}$')
+# CSS families a neutral state patch already covers; other source properties come from extensions.web.
+PATCH_FAMILIES = ('background', 'opacity', 'border', 'outline', 'box-shadow', 'color', 'text-decoration', 'font-size',
+                  'font-weight', 'transform', 'display', 'visibility')
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _shadows_css(shadows):
+    return ','.join(('inset ' if shadow.get('inset') else '') + ' '.join(_px(shadow[key]) for key in ('x', 'y', 'blur', 'spread'))
+                    + ' ' + _rgba(shadow['color']) for shadow in shadows) or 'none'
+
+
+def _fraction(value, scale, unit):
+    return _n(round(value * scale, 4)) + unit
+
+
+def gradient_css(gradients):
+    """background-image layers from neutral gradients (first is topmost); an empty list clears the image."""
+    layers = []
+    for gradient in gradients:
+        kind = gradient.get('type')
+        unit, scale = ('deg', 360) if kind == 'conic' else ('%', 100)
+        stops = ','.join(_rgba(stop['color']) + ('' if not _number(stop.get('position')) else ' ' + _fraction(stop['position'], scale, unit))
+                         for stop in gradient.get('stops') or [])
+        center = gradient.get('center')
+        at = ' at %s %s' % (_fraction(center['x'], 100, '%'), _fraction(center['y'], 100, '%')) if center else ''
+        angle = gradient.get('angle')
+        if kind == 'linear':
+            head = _n(angle if _number(angle) else 180) + 'deg'
+        elif kind == 'radial':
+            head = ('circle' if gradient.get('circle') else 'ellipse') + at
+        elif kind == 'conic':
+            head = 'from ' + _n(angle if _number(angle) else 0) + 'deg' + at
+        else:
+            continue
+        layers.append(('repeating-' if gradient.get('repeating') else '') + kind + '-gradient(' + head + ',' + stops + ')')
+    return ','.join(layers) or 'none'
+
+
+def stroke_css(strokes, reset=False):
+    """Inside strokes become borders, outside strokes the outline; reset clears both first (a state patch replaces the list)."""
+    out = ['border-style:none', 'outline:none'] if reset else []
+    for stroke in strokes:
+        style = stroke.get('style') if stroke.get('style') in STROKE_STYLES else 'solid'
+        line = _px(stroke['width']) + ' ' + style + ' ' + _rgba(stroke['color'])
+        if stroke.get('placement') == 'outside':
+            out.append('outline:' + line)
+            if _number(stroke.get('offset')): out.append('outline-offset:' + _px(stroke['offset']))
+        else:
+            out += ['border-' + edge + ':' + line for edge in stroke['edges']] if stroke.get('edges') else ['border:' + line]
+    return out
+
+
+def patch_css(patch):
+    """CSS declarations for a neutral state patch; present fields replace the node's values."""
+    out = []
+    if patch.get('fill'): out.append('background-color:' + _rgba(patch['fill']))
+    if isinstance(patch.get('gradients'), list): out.append('background-image:' + gradient_css(patch['gradients']))
+    if _number(patch.get('opacity')): out.append('opacity:' + _n(patch['opacity']))
+    if patch.get('cornerRadii'):
+        out.append('border-radius:' + ' '.join(_px(patch['cornerRadii'][side]) for side in ('top', 'right', 'bottom', 'left')))
+    if isinstance(patch.get('strokes'), list): out += stroke_css(patch['strokes'], reset=True)
+    if isinstance(patch.get('shadows'), list): out.append('box-shadow:' + _shadows_css(patch['shadows']))
+    if patch.get('textColor'): out.append('color:' + _rgba(patch['textColor']))
+    if isinstance(patch.get('decorations'), list):
+        out.append('text-decoration-line:' + (' '.join({'strikethrough': 'line-through'}.get(item, item) for item in patch['decorations']) or 'none'))
+    if _number(patch.get('fontSize')): out.append('font-size:' + _px(patch['fontSize']))
+    if _number(patch.get('fontWeight')): out.append('font-weight:' + _n(patch['fontWeight']))
+    transform = patch.get('transform')
+    if isinstance(transform, list) and len(transform) == 16 and all(_number(value) for value in transform):
+        out.append('transform:matrix3d(' + ','.join(_n(float(value)) for value in transform) + ')')
+    if patch.get('visible') is False: out.append('display:none')
+    elif patch.get('visible') is True: out.append('visibility:visible')
+    return out
+
+
+def _web_extension(item):
+    return ((item or {}).get('extensions') or {}).get('web') or {}
+
+
 def state_rules(raw_nodes, emitted):
     """CSS for measured interaction states (nodes[].states); unknown states and unsafe values are reported, not guessed."""
     rules, skipped = [], []
     for node_id in sorted(emitted):
         for state in (raw_nodes.get(node_id) or {}).get('states') or []:
             pseudo = STATE_SELECTORS.get(state.get('state'))
-            declarations = []
-            for name, value in sorted((state.get('changes') or {}).items()):
+            declarations = patch_css(state.get('patch') or {})
+            # This is the Web output adapter, so Web source properties without a neutral field (cursor...) are reused.
+            for name, value in sorted(_web_extension(state).items()):
                 prop, safe = _kebab(name), _safe_css_value(value)
-                if safe is not None and _CSS_PROPERTY.match(prop):
+                covered = any(prop == family or prop.startswith(family + '-') for family in PATCH_FAMILIES)
+                if not covered and safe is not None and _CSS_PROPERTY.match(prop):
                     declarations.append(prop + ':' + safe)
             trigger = state.get('triggerNodeId')
             if pseudo is None or not declarations or (trigger and trigger not in emitted):
@@ -409,19 +496,64 @@ def theme_rules(scene):
     """Current theme tokens on :root, other captured themes under [data-theme=ID] (no OS switching was measured)."""
     themes = scene.get('themes') or []
     current = next((theme for theme in themes if theme.get('current')), None)
-    base = (current or {}).get('tokens') or {}
+    base = theme_tokens(current or {})
     rules, summary = [], []
     for theme in themes:
-        tokens = theme.get('tokens') or {}
+        tokens = theme_tokens(theme)
         changed = tokens if theme is current else {key: value for key, value in tokens.items() if base.get(key) != value}
-        declarations = [key + ':' + safe for key, value in sorted(changed.items())
-                        if _CSS_TOKEN.match(key) and (safe := _safe_css_value(value)) is not None]
+        declarations = [key + ':' + value for key, value in sorted(changed.items())]
         selector = ':root' if theme is current else ':root[data-theme=' + _css_string(theme['id']) + ']'
         if declarations:
             rules.append(_rule(selector, declarations))
         summary.append({'id': theme['id'], 'current': bool(theme.get('current')), 'selector': selector,
                         'tokens': len(declarations), 'evidence': theme.get('evidence') or []})
     return rules, summary
+
+
+def token_css(token):
+    """CSS value of a typed theme token, or None."""
+    kind = token.get('type')
+    if kind == 'color' and token.get('color'): return _rgba(token['color'])
+    if kind == 'dimension' and _number(token.get('number')): return _px(token['number'])
+    if kind == 'number' and _number(token.get('number')): return _n(token['number'])
+    if kind == 'shadow' and token.get('shadows'): return _shadows_css(token['shadows'])
+    if kind == 'fontFamily' and token.get('fontFamilies'):
+        return ','.join(family if family.lower() in GENERIC_FONTS else _css_string(family) for family in token['fontFamilies'])
+    return None
+
+
+def theme_tokens(theme):
+    """Custom properties for one theme: typed tokens named --NAME, plus safe untyped Web source tokens."""
+    tokens = {}
+    for name, value in _web_extension(theme).items():
+        if _CSS_TOKEN.match(name) and (safe := _safe_css_value(value)) is not None:
+            tokens[name] = safe
+    for token in theme.get('tokens') or []:
+        name = token.get('name') if isinstance(token, dict) else None
+        if isinstance(name, str) and _TOKEN_NAME.match(name) and (value := token_css(token)) is not None:
+            tokens['--' + name] = value
+    return tokens
+
+
+def sample_css(entry):
+    """CSS properties for the typed layout measured in a width sample."""
+    if entry.get('visible') is False:
+        return {'display': 'none'}
+    css = {}
+    arrangement = entry.get('arrangement')
+    if arrangement in ('row', 'column'):
+        css['display'] = 'flex'
+        css['flex-direction'] = arrangement + ('-reverse' if entry.get('reverse') else '')
+    elif arrangement == 'grid':
+        css['display'] = 'grid'
+        tracks = entry.get('columnTracks')
+        if isinstance(tracks, list) and tracks and all(_number(track) for track in tracks):
+            css['grid-template-columns'] = ' '.join(_px(track) for track in tracks)
+    elif arrangement == 'flow':
+        css['display'] = 'block'
+    if _number(entry.get('fontSize')):
+        css['font-size'] = _px(entry['fontSize'])
+    return css
 
 
 def layout_sample_table(scene, frame_id, emitted):
@@ -453,9 +585,11 @@ def layout_sample_table(scene, frame_id, emitted):
                 bounds = item['bounds']
                 table.setdefault(node_id, {})[key] = {'x': bounds['x'], 'y': bounds['y'], 'width': bounds['width'],
                                                       'height': bounds['height'], **(item.get('layout') or {})}
-    unplaced = {_n(sample['width']): [{'path': item['sourcePath'], **item['bounds'], **(item.get('layout') or {})}
-                                      for item in sample.get('unplaced') or []]
-                for sample in samples if sample.get('unplaced')}
+    unplaced = {_n(sample['width']): [{key: value for key, value in {
+        'id': item.get('id'), 'parentNodeId': item.get('parentNodeId'), 'path': _web_extension(item).get('path'),
+        **item['bounds'], **(item.get('layout') or {})}.items() if value is not None}
+        for item in sample.get('unplaced') or []]
+        for sample in samples if sample.get('unplaced')}
     summary = [{'id': sample['id'], 'width': sample['width'], 'height': sample['height'],
                 'nodes': sum(translate(sample['frameId'], item['nodeId']) in emitted for item in sample.get('nodes') or []),
                 'unplaced': len(sample.get('unplaced') or []),
@@ -463,13 +597,10 @@ def layout_sample_table(scene, frame_id, emitted):
     return {'schema': 'reconstruct.layout-samples.v1', 'frameId': frame_id,
             'note': 'Measured geometry at other window widths keyed by node ID then width; breakpoints.css applies the '
                     'layout differences. Nodes absent here were not sampled. unplaced lists elements that exist only at that '
-                    'width (CSS path, bounds, layout) and have no node in this frame: build them for that width. '
+                    'width (nearest ancestor node, CSS path, bounds, layout) and have no node in this frame: build them for '
+                    'that width. '
                     'Appearance and text were not re-measured.',
             'widths': summary, 'nodes': table, 'unplaced': unplaced}, summary
-
-
-BREAKPOINT_PROPERTIES = (('display', 'display'), ('flexDirection', 'flex-direction'),
-                         ('gridTemplateColumns', 'grid-template-columns'), ('fontSize', 'font-size'))
 
 
 def breakpoint_css(table, widths, profile_width):
@@ -487,11 +618,8 @@ def breakpoint_css(table, widths, profile_width):
             here, base = samples.get(key), samples.get(reference)
             if here is None or (base is None and key != reference):
                 continue
-            declarations = []
-            for name, css in BREAKPOINT_PROPERTIES:
-                value = _safe_css_value(here.get(name)) if isinstance(here.get(name), str) else None
-                if value is not None and (base is None or here.get(name) != base.get(name)):
-                    declarations.append(css + ':' + value)
+            here_css, base_css = sample_css(here), sample_css(base or {})
+            declarations = [prop + ':' + value for prop, value in here_css.items() if base is None or base_css.get(prop) != value]
             if base is not None and abs(here['width'] - base['width']) > 1:
                 declarations.append('width:min(' + _px(here['width']) + ',100%)')
             if declarations:
@@ -531,6 +659,19 @@ def style_css(style):
         out.append('display:grid')
         for key, prop in (('columnTracks', 'grid-template-columns'), ('rowTracks', 'grid-template-rows')):
             if style.get(key): out.append(prop + ':' + ' '.join(_px(track) for track in style[key]))
+    if _number(style.get('grow')): out.append('flex-grow:' + _n(style['grow']))
+    if _number(style.get('shrink')): out.append('flex-shrink:' + _n(style['shrink']))
+    if _number(style.get('basis')): out.append('flex-basis:' + _px(style['basis']))
+    if ALIGN.get(style.get('selfAlignment')): out.append('align-self:' + ALIGN[style['selfAlignment']])
+    if isinstance(style.get('order'), int) and not isinstance(style.get('order'), bool): out.append('order:' + str(style['order']))
+    cell = style.get('gridCell') or {}
+    if isinstance(cell.get('area'), str) and _AREA_NAME.match(cell['area']):
+        out.append('grid-area:' + cell['area'])
+    else:
+        for axis, prop in (('column', 'grid-column'), ('row', 'grid-row')):
+            start, span = cell.get(axis), cell.get(axis + 'Span')
+            parts = ([str(start)] if isinstance(start, int) else []) + (['span ' + str(span)] if isinstance(span, int) else [])
+            if parts: out.append(prop + ':' + ' / '.join(parts))
     if style.get('rowGap') is not None: out.append('row-gap:' + _px(style['rowGap']))
     if style.get('columnGap') is not None: out.append('column-gap:' + _px(style['columnGap']))
     for key, prop in (('mainAlignment', 'justify-content'), ('crossAlignment', 'align-items')):
@@ -554,12 +695,9 @@ def style_css(style):
     if style.get('cornerRadii'):
         radii = style['cornerRadii']
         out.append('border-radius:' + ' '.join(_px(radii[side]) for side in ('top', 'right', 'bottom', 'left')))
-    for stroke in style.get('strokes') or []:
-        border = _px(stroke['width']) + ' solid ' + _rgba(stroke['color'])
-        out += ['border-' + edge + ':' + border for edge in stroke['edges']] if stroke.get('edges') else ['border:' + border]
-    if style.get('shadows'):
-        out.append('box-shadow:' + ','.join(('inset ' if shadow.get('inset') else '') + ' '.join(
-            _px(shadow[key]) for key in ('x', 'y', 'blur', 'spread')) + ' ' + _rgba(shadow['color']) for shadow in style['shadows']))
+    if style.get('gradients'): out.append('background-image:' + gradient_css(style['gradients']))
+    out += stroke_css(style.get('strokes') or [])
+    if style.get('shadows'): out.append('box-shadow:' + _shadows_css(style['shadows']))
     if style.get('blur') is not None: out.append('filter:blur(' + _px(style['blur']) + ')')
     if style.get('backdropBlur') is not None: out.append('backdrop-filter:blur(' + _px(style['backdropBlur']) + ')')
     placement = style.get('mediaPlacement')
