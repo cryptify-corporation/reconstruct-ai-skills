@@ -4,9 +4,13 @@
 
 [Reconstruct](https://reconstruct.dev) captures web interfaces — screenshots, element trees, styles, assets, routes and recorded flows — and serves them to AI coding agents through a hosted MCP server. This repository packages that server together with nine agent skills that guide an agent from inspecting a reference interface to building, verifying and launching a product.
 
-It works as a Claude Code plugin, a Cursor plugin, a Gemini CLI extension and a plain [Agent Skills](https://agentskills.io) collection.
+It works as a Codex plugin, a Claude Code plugin, a Cursor plugin, a Gemini CLI extension and a plain [Agent Skills](https://agentskills.io) collection.
 
 ## Install
+
+### Codex
+
+This repository includes `.codex-plugin/plugin.json`, nine skills under `skills/`, and the hosted MCP connection in `.mcp.json`. Import the GitHub repository as a plugin in Codex; connect your Reconstruct account through the existing OAuth flow.
 
 ### Claude Code
 

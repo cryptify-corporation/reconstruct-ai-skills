@@ -87,6 +87,7 @@ def overview(document, frame_id=None, offset=0, limit=40):
                 ('button', 'tab', 'link', 'textbox', 'checkbox', 'combobox', 'menuitem', 'dialog')]
     return {
         'schema': 'reconstruct.scene-reader.v1', 'sceneId': scene['id'],
+        'pageIntent': document.get('semantics'), 'semanticGaps': document.get('semanticGaps', []),
         'note': 'Derived navigation index only. Values omit fact provenance here; nodes command returns exact canonical facts. Missing values are unknown. Controls/actions do not prove a working destination. Hidden nodes are not initial UI.',
         'frames': [{k: f.get(k) for k in ('id', 'profileId', 'stateId', 'truncated')} for f in scene['frames']],
         'selectedFrame': {k: v for k, v in frame.items() if k != 'nodes'},
