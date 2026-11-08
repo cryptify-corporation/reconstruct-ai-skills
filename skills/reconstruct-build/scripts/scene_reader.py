@@ -1775,7 +1775,7 @@ def write_report(directory, document=None, frame_id=None):
     out += ['', NOTES_HEADING, '', notes.rstrip('\n'), '']
     path.write_text('\n'.join(out), encoding='utf-8', newline='\n')
     return {'path': str(path), 'lines': len(out), 'verify': 'PASS' if result['pass'] else 'FAIL',
-            'next': 'Append your own changes under "%s" in report.md, then stop.' % NOTES_HEADING}
+            'next': 'Continue implementing the requested scope and checking rendering and behavior; record changes, checks and gaps under "%s" in report.md.' % NOTES_HEADING}
 
 
 
@@ -2008,12 +2008,13 @@ def verify(directory, document=None, frame_id=None, min_coverage=0.9):
     return {'schema': 'reconstruct.scaffold-verify.v1', 'pass': not failures, 'failures': failures, 'checks': checks}
 
 
-HELP = """Workflow (one call per step; never read this script's source or the generated files to plan):
+HELP = """Workflow (initial diagnostic pass; inspect generated files when integration or a reproduced mismatch requires it):
   1. scaffold --scene SCENE --output site [--frame ID]   complete page: markup, styles, assets, observed interactions
   2. todo --dir site                                      exact fixes for failed checks, or "DONE: run report"
   3. apply --dir site --item N                            apply todo item N, then run todo again
   4. report --dir site --scene SCENE                      writes site/report.md (frame, controls, components, gaps, checks)
-  5. append your own changes under "## Notes on edits" in site/report.md, then stop
+  5. continue implementing the requested scope and checking rendering and behavior; record changes, checks and gaps
+     under "## Notes on edits" in site/report.md. Helper DONE/PASS is not task completion.
 Evidence gaps (missing fonts/media, unknown paint order, unobserved destinations) are reported, never todo items.
 Optional: verify --dir site (compact JSON, exit 1 on failure); tree --scene SCENE --id NODE --depth 2 (one subtree).
 Queries: overview, brief, coverage, nodes --ids (exact facts, max 12), spec --output, assets --output.
